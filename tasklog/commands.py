@@ -323,6 +323,27 @@ def cmd_report(store, args) -> None:
 
 # ----- editing items (ID rename / ID delete) -----
 
+def _relocate_project(store, entities: dict, project: Entity, new_parent: str, new_name: str) -> None:
+    """Give a project a new parent and/or name, and update everything that lives inside it.
+
+    Items inside store their parent as a path string, so their paths are rewritten.
+    If the pointer is inside the project, it follows the project.
+    """
+    old_path = project.path
+    new_path = join_path(new_parent, new_name)
+    for e in entities.values():
+        if e.id != project.id and (e.parent == old_path or e.parent.startswith(old_path + "/")):
+            e.parent = new_path + e.parent[len(old_path):]
+    project.parent = new_parent
+    project.name = new_name
+
+    state = store.load_state()
+    cwd = state.get("cwd", "")
+    if cwd == old_path or cwd.startswith(old_path + "/"):
+        state["cwd"] = new_path + cwd[len(old_path):]
+        store.save_state(state)
+
+
 def cmd_rename(store, args) -> None:
     """Rename a task or project. Renaming a project also updates every path below it."""
     entities = store.load_entities()
@@ -334,21 +355,39 @@ def cmd_rename(store, args) -> None:
 
     old_name = entity.name
     if entity.kind == "project":
-        old_path = entity.path
-        new_path = join_path(entity.parent, new_name)
-        # Items inside the project store their parent as a path string, so rewrite it.
-        for e in entities.values():
-            if e.parent == old_path or e.parent.startswith(old_path + "/"):
-                e.parent = new_path + e.parent[len(old_path):]
-        state = store.load_state()
-        cwd = state.get("cwd", "")
-        if cwd == old_path or cwd.startswith(old_path + "/"):
-            state["cwd"] = new_path + cwd[len(old_path):]
-            store.save_state(state)
-    entity.name = new_name
+        _relocate_project(store, entities, entity, entity.parent, new_name)
+    else:
+        entity.name = new_name
     entities[entity.id] = entity
     store.save_entities(entities)
     print(f"Renamed {entity.kind} '{old_name}' to '{new_name}' [{entity.id}]")
+
+
+def cmd_move(store, args) -> None:
+    """Move a task or project into another project.
+
+    The destination is a project path, resolved like `cd` (relative to the pointer,
+    a leading '/' from root, '..' for the parent). A project cannot move into itself.
+    """
+    entities = store.load_entities()
+    item = _resolve(store, entities, args.id, kind=None)
+    state = store.load_state()
+    dest = resolve_project(entities, state.get("cwd", ""), args.destination)
+
+    if dest == item.parent:
+        raise TasklogError(f"'{item.name}' is already in {display_path(dest)}")
+    if item.kind == "project" and (dest == item.path or dest.startswith(item.path + "/")):
+        raise TasklogError(f"cannot move project '{item.name}' into itself")
+    if any(e.parent == dest and e.name == item.name and e.id != item.id for e in entities.values()):
+        raise TasklogError(f"'{item.name}' already exists in {display_path(dest)}")
+
+    if item.kind == "project":
+        _relocate_project(store, entities, item, dest, item.name)
+    else:
+        item.parent = dest
+    entities[item.id] = item
+    store.save_entities(entities)
+    print(f"Moved {item.kind} '{item.name}' [{item.id}] to {display_path(dest)}")
 
 
 def cmd_delete(store, args) -> None:

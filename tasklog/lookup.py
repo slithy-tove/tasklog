@@ -1,57 +1,110 @@
-# tasklog
+"""Name validation, project-path resolution, and ID matching.
 
-An offline, on-demand command-line time tracker. It has no daemon, needs no network,
-and does nothing unless you run it.
+Project paths use "/" between levels, like a file system:
+  work            a top-level project
+  work/client1    a subproject of work
+  /work/client1   the same, written from the root (a leading "/" means "from root")
 
-## Install
+Partial IDs: any unique prefix of an ID is accepted ("3f" works if only one ID starts
+with "3f"). An exact match always wins.
 
-```
-pip install -e .
-tasklog help
-```
+The keyword ACTIVE refers to the currently running task, wherever a task ID is expected.
+"""
+from typing import Dict, Optional
 
-## Quick start
+from .errors import TasklogError
+from .store import Entity
 
-```
-tasklog create -p work            # project "work"
-tasklog cd work
-tasklog create -t website         # prints the new task's ID, e.g. 3f9a2c
-tasklog 3f start                  # partial IDs work
-tasklog 3f stop
-tasklog 3f label billing
-tasklog 3f manual today::09:00:00 today::10:30:00
-tasklog                           # details of the running task (same as: tasklog ACTIVE info)
-tasklog ACTIVE stop               # ACTIVE means whatever task is running
-tasklog 3f info                   # details and time blocks for a task
-tasklog 3f desc                   # opens $VISUAL/$EDITOR (default: vim)
-tasklog 3f rename website-v2      # works for projects too
-tasklog 3f delete                 # asks first; -y skips the prompt
-tasklog cd
-tasklog report -p work -sl        # time on work, split by label
-```
+SEP = "/"                 # separator between project levels
+ACTIVE_KEYWORD = "active" # shorthand for the running task
 
-Run `tasklog help` for concepts and `tasklog help report` for the report options.
-Run `tasklog COMMAND -h` for one command's options.
 
-## Where data lives
+def validate_name(name: str) -> str:
+    """Reject names that would break paths or the command syntax."""
+    name = name.strip()
+    if not name:
+        raise TasklogError("name cannot be empty")
+    if SEP in name:
+        raise TasklogError(f"name '{name}' cannot contain '{SEP}'")
+    if ":" in name:
+        raise TasklogError(f"name '{name}' cannot contain ':'")
+    if name in (".", ".."):
+        raise TasklogError(f"name cannot be '{name}'")
+    return name
 
-`~/.tasklog/` (or `$TASKLOG_HOME`):
 
-| File | Contents | Written when |
-|---|---|---|
-| `index.jsonl` | project and task headers | creating items, changing labels |
-| `blocks.jsonl` | finished time blocks | starting or stopping a timer, adding manual blocks |
-| `state.json` | pointer and running timer | `cd`, `start`, `stop` |
-| `desc/<id>.txt` | long descriptions | `ID desc` |
+def projects_by_path(entities: Dict[str, Entity]) -> Dict[str, Entity]:
+    """Map each project's path (e.g. 'work/client1') to its entity."""
+    return {e.path: e for e in entities.values() if e.kind == "project"}
 
-## Code map
 
-| Module | Purpose |
-|---|---|
-| `cli.py` | argument parsing and dispatch |
-| `commands.py` | each command's behavior |
-| `report.py` | the `report` command: filters, sweeps, output |
-| `store.py` | all file reads and writes |
-| `lookup.py` | name validation, project paths, partial ID matching |
-| `timeparse.py` | date and time strings |
-| `helpdocs.py` | long-form help text |
+def display_path(path: str) -> str:
+    return path if path else "(root)"
+
+
+def join_path(parent: str, name: str) -> str:
+    """Path of a child named `name` inside `parent` ("" is the root)."""
+    return f"{parent}{SEP}{name}" if parent else name
+
+
+def resolve_project(entities: Dict[str, Entity], base: str, target: str) -> str:
+    """Turn a `cd` argument into an absolute project path.
+
+    - A leading "/" starts from the root; otherwise the path is relative to `base`.
+    - ".." goes up one level; "." stays put.
+    - Every named level must already exist as a project.
+    """
+    projects = projects_by_path(entities)
+    if target.startswith(SEP):
+        current = ""
+        target = target[1:]
+    else:
+        current = base
+
+    target = target.rstrip(SEP)          # allow a trailing slash: "work/"
+    parts = target.split(SEP) if target else []
+    for part in parts:
+        if part == "":
+            raise TasklogError(f"malformed project path '{target}'")
+        if part == ".":
+            continue
+        if part == "..":
+            current = current.rpartition(SEP)[0]   # "a/b" -> "a"; "a" -> ""
+            continue
+        child = f"{current}{SEP}{part}" if current else part
+        if child not in projects:
+            raise TasklogError(f"no project named '{part}' under {display_path(current)}")
+        current = child
+    return current
+
+
+def resolve_id(entities: Dict[str, Entity], text: str, kind: Optional[str] = "task",
+               active_id: Optional[str] = None) -> Entity:
+    """Find an entity by full ID, partial ID, or the ACTIVE keyword.
+
+    kind="task" or "project" restricts the search to that kind; kind=None searches both.
+    active_id is the ID of the running task, used to resolve the ACTIVE keyword.
+    """
+    needle = text.strip().lower()
+
+    if needle == ACTIVE_KEYWORD:
+        if active_id is None or active_id not in entities:
+            raise TasklogError("nothing is being tracked right now")
+        entity = entities[active_id]
+        return entity
+
+    candidates = [e for e in entities.values() if kind is None or e.kind == kind]
+
+    for e in candidates:
+        if e.id == needle:
+            return e
+
+    matches = [e for e in candidates if needle and e.id.startswith(needle)]
+    if not matches:
+        label = kind or "item"
+        raise TasklogError(f"no {label} matches ID '{text}'")
+    if len(matches) > 1:
+        listing = "\n".join(f"  {e.id}  {e.name}" for e in matches)
+        raise TasklogError(f"ID '{text}' is ambiguous; it matches:\n{listing}\n"
+                           f"type more characters to narrow it down")
+    return matches[0]

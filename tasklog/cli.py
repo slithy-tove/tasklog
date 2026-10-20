@@ -14,7 +14,7 @@ from . import commands, helpdocs
 from .errors import TasklogError
 from .store import Store
 
-ID_VERBS = ("start", "stop", "manual", "label", "desc", "rename", "delete", "info")
+ID_VERBS = ("start", "stop", "manual", "label", "desc", "rename", "move", "delete", "info")
 
 HANDLERS = {
     "cd": commands.cmd_cd,
@@ -30,6 +30,7 @@ ID_HANDLERS = {
     "label": commands.cmd_label,
     "desc": commands.cmd_desc,
     "rename": commands.cmd_rename,
+    "move": commands.cmd_move,
     "delete": commands.cmd_delete,
     "info": commands.cmd_info,
 }
@@ -127,6 +128,14 @@ def build_id_parser() -> argparse.ArgumentParser:
                             description="Rename a task or project. Renaming a project also "
                                         "updates the paths of everything inside it.")
     rename.add_argument("new_name", metavar="NEW_NAME")
+
+    move = sub.add_parser("move", help="move this task or project into another project",
+                          description="Move a task or project into a different project. Moving a "
+                                      "project moves everything inside it. A project cannot be "
+                                      "moved into itself.")
+    move.add_argument("destination", metavar="DESTINATION",
+                      help="project to move into: a path such as work/client, '..' for the "
+                           "parent, or '/' for root")
 
     delete = sub.add_parser("delete", help="delete this task or empty project",
                             description="Delete a task (with its time blocks and description) "

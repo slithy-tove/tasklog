@@ -25,6 +25,7 @@ tasklog ACTIVE stop               # ACTIVE means whatever task is running
 tasklog 3f info                   # details and time blocks for a task
 tasklog 3f desc                   # opens $VISUAL/$EDITOR (default: vim)
 tasklog 3f rename website-v2      # works for projects too
+tasklog 3f move /archive          # move a task or project into another project
 tasklog 3f delete                 # asks first; -y skips the prompt
 tasklog cd
 tasklog report -p work -sl        # time on work, split by label
