@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tasklog"
+version = "0.1.0"
+description = "A small, offline, on-demand command-line time tracker with projects, tasks, labels and reports."
+requires-python = ">=3.8"
+dependencies = []   # standard library only
+
+[project.scripts]
+tasklog = "tasklog.cli:main"
+
+[tool.setuptools]
+packages = ["tasklog"]
