@@ -32,6 +32,7 @@ from .errors import TasklogError
 ID_CHARS = string.ascii_lowercase + string.digits   # alphabet for random IDs
 ID_LENGTH = 6                                       # IDs are six characters
 DEFAULT_LABEL = "None"
+FORMAT_VERSION = "2"                                # see Store._migrate_dots_to_slashes
 
 
 @dataclass
@@ -39,7 +40,7 @@ class Entity:
     """A project or a task.
 
     `parent` is the dotted path of the containing project; "" means the root.
-    A project's own path is therefore `parent + "." + name` (or just `name` at root).
+    A project's own path is therefore `parent + "/" + name` (or just `name` at root).
     """
     id: str
     kind: str                      # "project" or "task"
@@ -50,8 +51,8 @@ class Entity:
 
     @property
     def path(self) -> str:
-        """Full dotted path. Only meaningful for projects."""
-        return f"{self.parent}.{self.name}" if self.parent else self.name
+        """Full slash-separated path, e.g. 'work/client1'. Only meaningful for projects."""
+        return f"{self.parent}/{self.name}" if self.parent else self.name
 
 
 class Store:
@@ -75,6 +76,8 @@ class Store:
                     if line.strip():
                         entity = Entity(**json.loads(line))
                         entities[entity.id] = entity
+            if entities and not self._format_is_current():
+                self._migrate_dots_to_slashes(entities)
         return entities
 
     def save_entities(self, entities: Dict[str, Entity]) -> None:
@@ -82,14 +85,37 @@ class Store:
         self.home.mkdir(parents=True, exist_ok=True)
         text = "".join(json.dumps(asdict(e)) + "\n" for e in entities.values())
         _atomic_write(self.index_path, text)
+        _atomic_write(self.format_path, FORMAT_VERSION + "\n")
 
     def new_id(self, entities: Dict[str, Entity]) -> str:
-        """Random six-character ID that does not already exist in the index."""
+        """Random six-character ID that does not already exist in the index.
+
+        "active" is excluded because it is reserved as the ACTIVE keyword.
+        """
         rng = random.SystemRandom()
         while True:
             candidate = "".join(rng.choice(ID_CHARS) for _ in range(ID_LENGTH))
-            if candidate not in entities:
+            if candidate not in entities and candidate != "active":
                 return candidate
+
+    # ---- format versioning ----
+    # Version 1 separated project levels with "."; version 2 uses "/".
+    # Data written by version 1 is converted once, the first time it is loaded.
+
+    @property
+    def format_path(self) -> Path:
+        return self.home / "format"
+
+    def _format_is_current(self) -> bool:
+        return self.format_path.exists() and self.format_path.read_text(encoding="utf-8").strip() == FORMAT_VERSION
+
+    def _migrate_dots_to_slashes(self, entities: Dict[str, Entity]) -> None:
+        for e in entities.values():
+            e.parent = e.parent.replace(".", "/")
+        self.save_entities(entities)               # also writes the format marker
+        state = self.load_state()
+        state["cwd"] = state.get("cwd", "").replace(".", "/")
+        self.save_state(state)
 
     # ---- state: pointer and running timer ----
 

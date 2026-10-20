@@ -46,7 +46,8 @@ def build_main_parser() -> argparse.ArgumentParser:
     cd = sub.add_parser("cd", help="move the current-project pointer",
                         description="Move the pointer to a project. No argument returns to root.")
     cd.add_argument("project", nargs="?", default="", metavar="PROJECT",
-                    help="dotted project path; '..' goes up, '/' prefix means from root")
+                    help="slash-separated project path, e.g. work/client1; '..' goes up; "
+                         "a leading '/' starts from root")
 
     sub.add_parser("ls", help="list projects and tasks here",
                    description="List the projects and tasks in the current project, with IDs and labels.")
@@ -66,7 +67,7 @@ def build_main_parser() -> argparse.ArgumentParser:
         epilog="examples:\n"
                "  tasklog report -d today yesterday -l billing\n"
                "  tasklog report -p work -sl\n"
-               "  tasklog report -dr 2026-10-15::today -p work.site -sd",
+               "  tasklog report -dr 2026-10-15::today -p work/site -sd",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     dates = report.add_mutually_exclusive_group()
@@ -93,7 +94,7 @@ def build_id_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tasklog ID",
         description="Actions on one task. Put the task ID first, e.g. 'tasklog 3f start'. "
-                    "A unique prefix of the ID is enough.",
+                    "A unique prefix of the ID is enough, and ACTIVE means the running task.",
     )
     sub = parser.add_subparsers(dest="verb", metavar="VERB", required=True)
 
@@ -112,12 +113,15 @@ def build_id_parser() -> argparse.ArgumentParser:
                                        "Use 'none' to clear it.")
     label.add_argument("label", metavar="LABEL")
 
-    sub.add_parser("info", help="show details and time blocks for this task",
-                   description="Print a task's project, label, status, total time, and every "
-                               "time block it has. The description is not shown; use 'desc' for it.")
+    sub.add_parser("info", help="show details and time blocks (task or project)",
+                   description="For a task: its project, label, status, total time and every "
+                               "time block. For a project: its contents and the total time and "
+                               "blocks of every task inside it. The description is not shown; "
+                               "use 'desc' for it.")
 
-    sub.add_parser("desc", help="edit the long description in your editor",
-                   description="Open the description in $VISUAL or $EDITOR (default: vim).")
+    sub.add_parser("desc", help="edit the long description (task or project)",
+                   description="Open the description in $VISUAL or $EDITOR (default: vim). "
+                               "Works on tasks and projects.")
 
     rename = sub.add_parser("rename", help="rename this task or project",
                             description="Rename a task or project. Renaming a project also "
@@ -135,9 +139,11 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     store = Store()
     try:
-        if not argv or argv[0] in ("-h", "--help"):
+        if argv and argv[0] in ("-h", "--help"):
             print(helpdocs.topic())
             return 0
+        if not argv:
+            argv = ["ACTIVE", "info"]        # bare `tasklog` shows the running task
 
         if argv[0] == "help":
             args = build_main_parser().parse_args(argv)

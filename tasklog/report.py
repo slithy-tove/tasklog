@@ -51,19 +51,19 @@ def project_key(parent: str, filters: Optional[List[str]]) -> Optional[str]:
     """
     if filters is None:
         return parent or "(root)"
-    matches = [f for f in filters if parent == f or parent.startswith(f + ".")]
+    matches = [f for f in filters if parent == f or parent.startswith(f + "/")]
     if not matches:
         return None
     best = max(matches, key=len)          # the most specific filter wins
     if parent == best:
         return best
-    next_level = parent[len(best) + 1:].split(".")[0]
-    return f"{best}.{next_level}"
+    next_level = parent[len(best) + 1:].split("/")[0]
+    return f"{best}/{next_level}"
 
 
 def _normalize_project(text: str, entities: Dict[str, Entity]) -> str:
-    """Accept 'project1.sub' or '/project1.sub' (a leading slash is optional)."""
-    path = text.strip().strip("/").strip(".")
+    """Accept 'work/client1' or '/work/client1' (a leading slash is optional)."""
+    path = text.strip().strip("/")
     if path not in projects_by_path(entities):
         raise TasklogError(f"no project named '{text}'")
     return path
@@ -99,7 +99,9 @@ def run(store, args) -> None:
         days = {first + timedelta(n) for n in range((last - first).days + 1)}
 
     label_set = {x.strip().lower() for x in args.label} if args.label else None
-    task_ids = {resolve_id(entities, t).id for t in args.task} if args.task else None
+    active = store.load_state().get("active")
+    active_id = active["id"] if active else None
+    task_ids = {resolve_id(entities, t, "task", active_id).id for t in args.task} if args.task else None
     project_filters = [_normalize_project(p, entities) for p in args.project] if args.project else None
 
     # ----- gather blocks, including a running timer counted up to now -----

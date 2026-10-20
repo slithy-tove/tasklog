@@ -10,14 +10,14 @@ tasklog: an offline, on-demand time tracker. It runs only when you call it,
 with no background process, and needs no network.
 
 Concepts
-  Projects   Folders that can hold projects and tasks. Projects nest with dots:
-             work.client1.website
+  Projects   Folders that can hold projects and tasks. Projects nest with slashes:
+             work/client1/website
   Tasks      Things you track time against. Each task has a six-character ID.
   Pointer    The "current project", like a working directory. Change it with cd.
   Label      One optional tag per task (default: None). Used for grouping in reports.
 
 Commands
-  tasklog cd [PROJECT]            Move the pointer. No argument goes to root.
+  tasklog cd [PROJECT]            Move the pointer. No argument goes to root; '..' goes up.
   tasklog ls                      List projects and tasks here, with IDs and labels.
   tasklog create -p NAME          Create a project here.       (--project)
   tasklog create -t NAME          Create a task here.          (--task)
@@ -25,13 +25,19 @@ Commands
   tasklog ID stop                 Stop tracking that task.
   tasklog ID manual START END     Add a finished time block.
   tasklog ID label LABEL          Set the label ("none" clears it).
-  tasklog ID info                 Show a task's details and all its time blocks.
-  tasklog ID desc                 Edit the long description in your editor (default: vim).
+  tasklog ID info                 Details and time blocks. For a project, the totals
+                                  of everything inside it.
+  tasklog ID desc                 Edit the long description (default editor: vim).
+                                  Works for tasks and projects.
   tasklog ID rename NEW_NAME      Rename a task or project.
   tasklog ID delete [-y]          Delete a task (with its time) or an empty project.
+
+  start, stop, manual and label work on tasks only. Track time on a task inside a
+  project; a project's time is the sum of the tasks below it.
   tasklog report ...              Totals, filters and sweeps. See: tasklog help report
   tasklog help [TOPIC]            Detailed help. Topics: ids, dates, report, storage, cd
 
+Running just "tasklog" shows the running task's details (same as "tasklog ACTIVE info").
 Shorthand and long forms are both accepted, for example -p and --project.
 Run "tasklog COMMAND -h" for the options of one command.
 """
@@ -45,6 +51,12 @@ Task IDs
       tasklog 3f start
   An exact match always wins. If a prefix matches several tasks, tasklog lists
   them and asks for more characters.
+
+  ACTIVE is a shorthand for the task being tracked right now:
+      tasklog ACTIVE info
+      tasklog ACTIVE stop
+  It works anywhere a task ID is accepted, including report -t. If nothing is
+  being tracked, ACTIVE gives an error.
 """
 
 DATES = """\
@@ -87,8 +99,8 @@ report: totals with filters and sweeps
   Examples
     tasklog report -d today yesterday -l billing     total for two days, billing label
     tasklog report -p work -sl                       work, split by label
-    tasklog report -dr 2026-10-15::today -p work.site -sd
-                                                     work.site, one row per day
+    tasklog report -dr 2026-10-15::today -p work/site -sd
+                                                     work/site, one row per day
 
   Days with no time show as 0 when you use -sd on a day list or range.
   A block that crosses midnight is split between the two days.
@@ -112,13 +124,15 @@ Where your data lives
 CD = """\
 cd: moving the pointer
   tasklog cd work            into project "work", relative to where you are
-  tasklog cd work.client1    several levels at once
+  tasklog cd work/client1    several levels at once, separated by slashes
   tasklog cd ..              up one level
+  tasklog cd ../other        up one level, then into "other"
   tasklog cd /work           absolute path, from root
   tasklog cd                 back to root
 
   Every level must already exist. Commands that take a project, such as
-  `create`, work relative to the pointer.
+  `create` and `report -p`, work relative to the pointer, or from root with a
+  leading slash.
 """
 
 TOPICS = {

@@ -5,16 +5,20 @@ Business rules worth knowing:
     that same instant, like timewarrior does.
   * `ID stop` only stops the task you name, so a typo cannot stop the wrong timer.
   * Names are unique among siblings (a project and a task cannot share a name in one place).
+  * The keyword ACTIVE can be used wherever a task ID is expected.
+  * Projects accept info, desc, rename and delete. Time-tracking verbs (start, stop,
+    manual, label) work on tasks only; a project's time is the sum of the tasks inside it.
 """
 import os
 import shlex
 import shutil
-import sys
 import subprocess
+import sys
 from datetime import datetime, timedelta
+from typing import Iterable, List, Optional, Tuple
 
 from .errors import TasklogError
-from .lookup import display_path, projects_by_path, resolve_id, resolve_project, validate_name
+from .lookup import display_path, join_path, projects_by_path, resolve_id, resolve_project, validate_name
 from .report import _print_table, fmt_duration, run as run_report
 from .store import DEFAULT_LABEL, Entity
 from .timeparse import parse_datetime
@@ -22,6 +26,30 @@ from .timeparse import parse_datetime
 
 def _now() -> datetime:
     return datetime.now().replace(microsecond=0)
+
+
+def _resolve(store, entities, text: str, kind: Optional[str] = None) -> Entity:
+    """Resolve an ID, partial ID, or ACTIVE using the current state of the timer.
+
+    kind=None accepts tasks and projects; kind="task" accepts tasks only.
+    """
+    active = store.load_state().get("active")
+    return resolve_id(entities, text, kind, active["id"] if active else None)
+
+
+def _task_only(store, entities, text: str, action: str) -> Entity:
+    """Resolve an ID that must refer to a task, with a helpful message for projects."""
+    entity = _resolve(store, entities, text)
+    if entity.kind != "task":
+        raise TasklogError(f"'{entity.name}' is a project; {action} needs a task. "
+                           f"Use a task inside the project instead")
+    return entity
+
+
+def _inside(entities: dict, project: Entity) -> List[Entity]:
+    """Every project and task below `project`, at any depth."""
+    return [e for e in entities.values()
+            if e.parent == project.path or e.parent.startswith(project.path + "/")]
 
 
 def normalize_label(text: str) -> str:
@@ -118,7 +146,7 @@ def cmd_create(store, args) -> None:
 
 def cmd_start(store, args) -> None:
     entities = store.load_entities()
-    task = resolve_id(entities, args.id)
+    task = _task_only(store, entities, args.id, "tracking time")
     state = store.load_state()
     now = _now()
 
@@ -138,7 +166,7 @@ def cmd_start(store, args) -> None:
 
 def cmd_stop(store, args) -> None:
     entities = store.load_entities()
-    task = resolve_id(entities, args.id)
+    task = _task_only(store, entities, args.id, "tracking time")
     state = store.load_state()
     active = state.get("active")
     if not active:
@@ -157,7 +185,7 @@ def cmd_stop(store, args) -> None:
 
 def cmd_manual(store, args) -> None:
     entities = store.load_entities()
-    task = resolve_id(entities, args.id)
+    task = _task_only(store, entities, args.id, "adding time")
     start = parse_datetime(args.start_time)
     end = parse_datetime(args.end_time)
     if end <= start:
@@ -176,7 +204,7 @@ def cmd_manual(store, args) -> None:
 
 def cmd_label(store, args) -> None:
     entities = store.load_entities()
-    task = resolve_id(entities, args.id)
+    task = _task_only(store, entities, args.id, "setting a label")
     label = normalize_label(args.label)   # "none" clears the label
     task.label = label
     entities[task.id] = task
@@ -184,49 +212,94 @@ def cmd_label(store, args) -> None:
     print(f"Label of '{task.name}' set to {label}")
 
 
+# ----- details -----
+
+def _block_rows(store, entities: dict, state: dict, task_ids: Iterable[str]) -> List[Tuple]:
+    """(task, start, end, running) for every block of the given tasks, oldest first."""
+    wanted = set(task_ids)
+    rows = [(entities[b["id"]], b["start"], b["end"], False)
+            for b in sorted((b for b in store.iter_blocks() if b["id"] in wanted),
+                            key=lambda b: b["start"])
+            if b["id"] in entities]
+    active = state.get("active")
+    if active and active["id"] in wanted and active["id"] in entities:
+        rows.append((entities[active["id"]], datetime.fromisoformat(active["start"]), _now(), True))
+    return rows
+
+
+def _print_block_table(rows: List[Tuple], with_task: bool) -> None:
+    headers = ["START", "END", "DURATION"] + (["TASK"] if with_task else [])
+    table = []
+    for task, start, end, running in rows:
+        line = [start.strftime("%Y-%m-%d %H:%M:%S"),
+                end.strftime("%Y-%m-%d %H:%M:%S") + (" (running)" if running else ""),
+                fmt_duration(end - start)]
+        if with_task:
+            line.append(f"{task.name} [{task.id}]")
+        table.append(line)
+    _print_table(headers, table)
+
+
+def cmd_info(store, args) -> None:
+    """Details for a task, or a summary for a project covering everything inside it.
+
+    The description is not shown; use `ID desc` for it.
+    """
+    entities = store.load_entities()
+    item = _resolve(store, entities, args.id)
+    state = store.load_state()
+    active = state.get("active")
+    now_running_id = active["id"] if active else None
+
+    if item.kind == "task":
+        rows = _block_rows(store, entities, state, [item.id])
+        running = now_running_id == item.id
+        total = sum((end - start for _, start, end, _ in rows), timedelta(0))
+        print(f"Task:     {item.name} [{item.id}]")
+        print(f"Project:  {display_path(item.parent)}")
+        print(f"Label:    {item.label}")
+        print(f"Created:  {item.created}")
+        print(f"Status:   {'running' if running else 'stopped'}")
+        print(f"Total:    {fmt_duration(total)}")
+        print(f"Blocks:   {len(rows)}")
+        if rows:
+            print()
+            _print_block_table(rows, with_task=False)
+        return
+
+    # Project: everything below it, at any depth.
+    members = _inside(entities, item)
+    task_ids = [e.id for e in members if e.kind == "task"]
+    rows = _block_rows(store, entities, state, task_ids)
+    total = sum((end - start for _, start, end, _ in rows), timedelta(0))
+    n_tasks = len(task_ids)
+    n_projects = len(members) - n_tasks
+    running = now_running_id in task_ids
+
+    print(f"Project:  {item.name} [{item.id}]")
+    print(f"Path:     {display_path(item.path)}")
+    print(f"Contents: {n_tasks} task(s), {n_projects} subproject(s)")
+    print(f"Created:  {item.created}")
+    print(f"Status:   {'a task inside is running' if running else 'nothing running'}")
+    print(f"Total:    {fmt_duration(total)}")
+    print(f"Blocks:   {len(rows)}")
+    if rows:
+        print()
+        _print_block_table(rows, with_task=True)
+
+
 def cmd_desc(store, args) -> None:
     entities = store.load_entities()
-    task = resolve_id(entities, args.id)
+    item = _resolve(store, entities, args.id, kind=None)
     store.desc_dir.mkdir(parents=True, exist_ok=True)
-    path = store.desc_path(task.id)
+    path = store.desc_path(item.id)
     path.touch(exist_ok=True)
 
     editor = _pick_editor()
     result = subprocess.run([*shlex.split(editor), str(path)])
     if result.returncode != 0:
         raise TasklogError(f"editor '{editor}' exited with status {result.returncode}; description not confirmed")
-    print(f"Description of '{task.name}' saved ({path})")
-
-
-def cmd_info(store, args) -> None:
-    """Print a task's details and every time block it has (the description is not shown)."""
-    entities = store.load_entities()
-    task = resolve_id(entities, args.id)
-    state = store.load_state()
-
-    rows = [(b["start"], b["end"], False)
-            for b in sorted((b for b in store.iter_blocks() if b["id"] == task.id),
-                            key=lambda b: b["start"])]
-    active = state.get("active")
-    running = bool(active and active["id"] == task.id)
-    if running:
-        rows.append((datetime.fromisoformat(active["start"]), _now(), True))
-
-    total = sum((end - start for start, end, _ in rows), timedelta(0))
-    print(f"Task:     {task.name} [{task.id}]")
-    print(f"Project:  {display_path(task.parent)}")
-    print(f"Label:    {task.label}")
-    print(f"Created:  {task.created}")
-    print(f"Status:   {'running' if running else 'stopped'}")
-    print(f"Total:    {fmt_duration(total)}")
-    print(f"Blocks:   {len(rows)}")
-    if rows:
-        print()
-        table = [[start.strftime("%Y-%m-%d %H:%M:%S"),
-                  end.strftime("%Y-%m-%d %H:%M:%S") + (" (running)" if is_running else ""),
-                  fmt_duration(end - start)]
-                 for start, end, is_running in rows]
-        _print_table(["START", "END", "DURATION"], table)
+    print(f"Description of '{item.name}' saved ({path})")
 
 
 def _pick_editor() -> str:
@@ -253,7 +326,7 @@ def cmd_report(store, args) -> None:
 def cmd_rename(store, args) -> None:
     """Rename a task or project. Renaming a project also updates every path below it."""
     entities = store.load_entities()
-    entity = resolve_id(entities, args.id, kind=None)
+    entity = _resolve(store, entities, args.id, kind=None)
     new_name = validate_name(args.new_name)
     if any(e.parent == entity.parent and e.name == new_name and e.id != entity.id
            for e in entities.values()):
@@ -262,14 +335,14 @@ def cmd_rename(store, args) -> None:
     old_name = entity.name
     if entity.kind == "project":
         old_path = entity.path
-        new_path = f"{entity.parent}.{new_name}" if entity.parent else new_name
+        new_path = join_path(entity.parent, new_name)
         # Items inside the project store their parent as a path string, so rewrite it.
         for e in entities.values():
-            if e.parent == old_path or e.parent.startswith(old_path + "."):
+            if e.parent == old_path or e.parent.startswith(old_path + "/"):
                 e.parent = new_path + e.parent[len(old_path):]
         state = store.load_state()
         cwd = state.get("cwd", "")
-        if cwd == old_path or cwd.startswith(old_path + "."):
+        if cwd == old_path or cwd.startswith(old_path + "/"):
             state["cwd"] = new_path + cwd[len(old_path):]
             store.save_state(state)
     entity.name = new_name
@@ -279,14 +352,13 @@ def cmd_rename(store, args) -> None:
 
 
 def cmd_delete(store, args) -> None:
-    """Delete a task (with its time blocks and description) or an empty project."""
+    """Delete a task (with its time blocks) or an empty project. Descriptions are removed too."""
     entities = store.load_entities()
-    entity = resolve_id(entities, args.id, kind=None)
+    entity = _resolve(store, entities, args.id, kind=None)
     state = store.load_state()
 
     if entity.kind == "project":
-        inside = [e for e in entities.values()
-                  if e.parent == entity.path or e.parent.startswith(entity.path + ".")]
+        inside = _inside(entities, entity)
         if inside:
             raise TasklogError(f"project '{entity.name}' still contains {len(inside)} item(s); "
                                f"delete those first")
@@ -310,13 +382,13 @@ def cmd_delete(store, args) -> None:
     # If the pointer is inside a deleted project, move it up to that project's parent.
     if entity.kind == "project":
         cwd = state.get("cwd", "")
-        if cwd == entity.path or cwd.startswith(entity.path + "."):
+        if cwd == entity.path or cwd.startswith(entity.path + "/"):
             state["cwd"] = entity.parent
 
     del entities[entity.id]
     store.save_entities(entities)
     if entity.kind == "task":
         store.drop_blocks_for(entity.id)
-        store.desc_path(entity.id).unlink(missing_ok=True)
+    store.desc_path(entity.id).unlink(missing_ok=True)
     store.save_state(state)
     print(f"Deleted {entity.kind} '{entity.name}' [{entity.id}]")

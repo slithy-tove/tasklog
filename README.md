@@ -20,6 +20,8 @@ tasklog 3f start                  # partial IDs work
 tasklog 3f stop
 tasklog 3f label billing
 tasklog 3f manual today::09:00:00 today::10:30:00
+tasklog                           # details of the running task (same as: tasklog ACTIVE info)
+tasklog ACTIVE stop               # ACTIVE means whatever task is running
 tasklog 3f info                   # details and time blocks for a task
 tasklog 3f desc                   # opens $VISUAL/$EDITOR (default: vim)
 tasklog 3f rename website-v2      # works for projects too
