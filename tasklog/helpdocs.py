@@ -1,183 +1,155 @@
-"""Command-line entry point: builds the argument parsers and dispatches commands.
+"""Long-form help text, printed by `tasklog help [TOPIC]`.
 
-Two syntaxes are supported:
-  tasklog COMMAND ...     e.g.  tasklog cd work        tasklog report -d today
-  tasklog ID VERB ...     e.g.  tasklog 3f start       tasklog 3f manual 09:00:00 10:30:00
-
-To add a new top-level command: write cmd_* in commands.py, add a subparser in
-build_main_parser(), and add it to HANDLERS.
+Short per-command help comes from argparse (`tasklog COMMAND -h`). These longer
+topics explain the concepts. To edit the wording, change the strings below.
 """
-import argparse
-import sys
-
-from . import commands, helpdocs
 from .errors import TasklogError
-from .store import Store
 
-ID_VERBS = ("start", "stop", "manual", "label", "desc", "rename", "move", "delete", "info")
+OVERVIEW = """\
+tasklog: an offline, on-demand time tracker. It runs only when you call it,
+with no background process, and needs no network.
 
-HANDLERS = {
-    "cd": commands.cmd_cd,
-    "ls": commands.cmd_ls,
-    "create": commands.cmd_create,
-    "report": commands.cmd_report,
+Concepts
+  Projects   Folders that can hold projects and tasks. Projects nest with slashes:
+             work/client1/website
+  Tasks      Things you track time against. Each task has a six-character ID.
+  Pointer    The "current project", like a working directory. Change it with cd.
+  Label      One optional tag per task (default: None). Used for grouping in reports.
+
+Commands
+  tasklog cd [PROJECT]            Move the pointer. No argument goes to root; '..' goes up.
+  tasklog ls                      List projects and tasks here, with IDs and labels.
+  tasklog create -p NAME          Create a project here.       (--project)
+  tasklog create -t NAME          Create a task here.          (--task)
+  tasklog ID start                Start tracking a task.
+  tasklog ID stop                 Stop tracking that task.
+  tasklog ID manual START END     Add a finished time block.
+  tasklog ID label LABEL          Set the label ("none" clears it).
+  tasklog ID info                 Details and time blocks. For a project, the totals
+                                  of everything inside it.
+  tasklog ID desc                 Edit the long description (default editor: vim).
+                                  Works for tasks and projects.
+  tasklog ID rename NEW_NAME      Rename a task or project.
+  tasklog ID move DESTINATION     Move a task or project into another project.
+  tasklog ID delete [-y]          Delete a task (with its time) or an empty project.
+
+  start, stop, manual and label work on tasks only. Track time on a task inside a
+  project; a project's time is the sum of the tasks below it.
+  tasklog report ...              Totals, filters and sweeps. See: tasklog help report
+  tasklog help [TOPIC]            Detailed help. Topics: ids, dates, report, storage, cd
+
+Running just "tasklog" shows the running task's details (same as "tasklog ACTIVE info").
+Shorthand and long forms are both accepted, for example -p and --project.
+Run "tasklog COMMAND -h" for the options of one command.
+"""
+
+IDS = """\
+Task IDs
+  IDs are six random lowercase letters or digits, generated when you create an
+  item and checked against existing IDs so they never repeat.
+
+  You can type any unique prefix. If "3f" matches only one task, "3f" is enough:
+      tasklog 3f start
+  An exact match always wins. If a prefix matches several tasks, tasklog lists
+  them and asks for more characters.
+
+  ACTIVE is a shorthand for the task being tracked right now:
+      tasklog ACTIVE info
+      tasklog ACTIVE stop
+  It works anywhere a task ID is accepted, including report -t. If nothing is
+  being tracked, ACTIVE gives an error.
+"""
+
+DATES = """\
+Dates and times
+  Times, for `ID manual START END`:
+    17:00:00                  today at 17:00:00 (seconds optional, 17:00 also works)
+    2026-10-17::17:00:00      an explicit date and time
+    today::17:00:00           today, with the given time
+    yesterday::17:00:00       yesterday, with the given time
+    now                       the current moment
+
+  Days, for `report -d` and `report -dr`:
+    2026-10-17, today, yesterday
+    "::" and anything after it is ignored here, so today::17:00:00 also works.
+
+  All times are your computer's local time.
+
+  Manual blocks may not overlap time that is already recorded, including a
+  running timer. An overlapping request is rejected with the conflicting block.
+"""
+
+REPORT = """\
+report: totals with filters and sweeps
+
+  Filters narrow which time counts:
+    -d, --date DAY [DAY ...]       one or more single days
+    -dr, --date-range FROM TO      an inclusive range; cannot be combined with -d
+    -l, --label LABEL [...]        tasks with any of these labels
+    -t, --task ID [ID ...]         specific tasks (partial IDs accepted)
+    -p, --project PROJ [...]       projects, including their subprojects
+
+  Sweeps group the counted time. They can be combined:
+    -sd, --sweep-date              one row per day
+    -sl, --sweep-label             one row per label
+    -sp, --sweep-project           one row per project (the next level below any -p filter)
+    -st, --sweep-task              one row per task
+
+  Without sweeps, the report prints one number: the total of the matching time.
+
+  Examples
+    tasklog report -d today yesterday -l billing     total for two days, billing label
+    tasklog report -p work -sl                       work, split by label
+    tasklog report -dr 2026-10-15::today -p work/site -sd
+                                                     work/site, one row per day
+
+  Days with no time show as 0 when you use -sd on a day list or range.
+  A block that crosses midnight is split between the two days.
+  The running timer, if any, counts up to the present moment.
+"""
+
+STORAGE = """\
+Where your data lives
+  Default folder: ~/.tasklog. Set TASKLOG_HOME to use another folder.
+
+  index.jsonl    Project and task headers only: small, read on every command.
+  blocks.jsonl   Finished time blocks, appended one line at a time.
+  state.json     The pointer and the running timer.
+  desc/ID.txt    Long descriptions, read only by `ID desc`.
+
+  Recording time only appends to blocks.jsonl, so it stays fast as history grows.
+  The index is rewritten in full when you create items or change labels.
+  Everything is plain text, so you can inspect or back it up with normal tools.
+"""
+
+CD = """\
+cd: moving the pointer
+  tasklog cd work            into project "work", relative to where you are
+  tasklog cd work/client1    several levels at once, separated by slashes
+  tasklog cd ..              up one level
+  tasklog cd ../other        up one level, then into "other"
+  tasklog cd /work           absolute path, from root
+  tasklog cd                 back to root
+
+  Every level must already exist. Commands that take a project, such as
+  `create` and `report -p`, work relative to the pointer, or from root with a
+  leading slash.
+"""
+
+TOPICS = {
+    "ids": IDS,
+    "dates": DATES,
+    "report": REPORT,
+    "storage": STORAGE,
+    "cd": CD,
 }
 
-ID_HANDLERS = {
-    "start": commands.cmd_start,
-    "stop": commands.cmd_stop,
-    "manual": commands.cmd_manual,
-    "label": commands.cmd_label,
-    "desc": commands.cmd_desc,
-    "rename": commands.cmd_rename,
-    "move": commands.cmd_move,
-    "delete": commands.cmd_delete,
-    "info": commands.cmd_info,
-}
 
-
-def build_main_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="tasklog",
-        description="Offline, on-demand command-line time tracker. "
-                    "Run 'tasklog help' for concepts and detailed documentation.",
-    )
-    sub = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
-
-    cd = sub.add_parser("cd", help="move the current-project pointer",
-                        description="Move the pointer to a project. No argument returns to root.")
-    cd.add_argument("project", nargs="?", default="", metavar="PROJECT",
-                    help="slash-separated project path, e.g. work/client1; '..' goes up; "
-                         "a leading '/' starts from root")
-
-    sub.add_parser("ls", help="list projects and tasks here",
-                   description="List the projects and tasks in the current project, with IDs and labels.")
-
-    create = sub.add_parser("create", help="create a project or task here",
-                            description="Create a project or a task in the current project.")
-    group = create.add_mutually_exclusive_group(required=True)
-    group.add_argument("-p", "--project", metavar="NAME", help="name of the new project")
-    group.add_argument("-t", "--task", metavar="NAME", help="name of the new task")
-    create.add_argument("-l", "--label", metavar="LABEL",
-                        help="label for a new task (tasks only; 'none' means no label)")
-
-    report = sub.add_parser(
-        "report", help="total time, with filters and sweeps",
-        description="Sum tracked time. Filters narrow it; sweeps split it into rows. "
-                    "See 'tasklog help report' for the full explanation.",
-        epilog="examples:\n"
-               "  tasklog report -d today yesterday -l billing\n"
-               "  tasklog report -p work -sl\n"
-               "  tasklog report -dr 2026-10-15::today -p work/site -sd",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    dates = report.add_mutually_exclusive_group()
-    dates.add_argument("-d", "--date", nargs="+", metavar="DAY", help="one or more single days")
-    dates.add_argument("-dr", "--date-range", nargs=2, metavar=("FROM", "TO"),
-                       help="inclusive date range")
-    report.add_argument("-l", "--label", nargs="+", metavar="LABEL", help="filter by label(s)")
-    report.add_argument("-t", "--task", nargs="+", metavar="ID", help="filter by task ID(s)")
-    report.add_argument("-p", "--project", nargs="+", metavar="PROJECT",
-                        help="filter by project(s), including subprojects")
-    report.add_argument("-sd", "--sweep-date", action="store_true", help="one row per day")
-    report.add_argument("-sl", "--sweep-label", action="store_true", help="one row per label")
-    report.add_argument("-sp", "--sweep-project", action="store_true", help="one row per project")
-    report.add_argument("-st", "--sweep-task", action="store_true", help="one row per task")
-
-    help_cmd = sub.add_parser("help", help="detailed documentation",
-                              description="Show detailed documentation, optionally for one topic.")
-    help_cmd.add_argument("topic", nargs="?", metavar="TOPIC",
-                          help="one of: " + ", ".join(sorted(helpdocs.TOPICS)))
-    return parser
-
-
-def build_id_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="tasklog ID",
-        description="Actions on one task. Put the task ID first, e.g. 'tasklog 3f start'. "
-                    "A unique prefix of the ID is enough, and ACTIVE means the running task.",
-    )
-    sub = parser.add_subparsers(dest="verb", metavar="VERB", required=True)
-
-    sub.add_parser("start", help="start tracking this task")
-    sub.add_parser("stop", help="stop tracking this task")
-
-    manual = sub.add_parser("manual", help="add a finished time block",
-                            description="Add a time block. Times accept forms such as "
-                                        "17:00:00, today::17:00:00, or 2026-10-17::17:00:00. "
-                                        "See 'tasklog help dates'.")
-    manual.add_argument("start_time", metavar="START")
-    manual.add_argument("end_time", metavar="END")
-
-    label = sub.add_parser("label", help="set the label (one per task)",
-                           description="Set the label, replacing any previous one. "
-                                       "Use 'none' to clear it.")
-    label.add_argument("label", metavar="LABEL")
-
-    sub.add_parser("info", help="show details and time blocks (task or project)",
-                   description="For a task: its project, label, status, total time and every "
-                               "time block. For a project: its contents and the total time and "
-                               "blocks of every task inside it. The description is not shown; "
-                               "use 'desc' for it.")
-
-    sub.add_parser("desc", help="edit the long description (task or project)",
-                   description="Open the description in $VISUAL or $EDITOR (default: vim). "
-                               "Works on tasks and projects.")
-
-    rename = sub.add_parser("rename", help="rename this task or project",
-                            description="Rename a task or project. Renaming a project also "
-                                        "updates the paths of everything inside it.")
-    rename.add_argument("new_name", metavar="NEW_NAME")
-
-    move = sub.add_parser("move", help="move this task or project into another project",
-                          description="Move a task or project into a different project. Moving a "
-                                      "project moves everything inside it. A project cannot be "
-                                      "moved into itself.")
-    move.add_argument("destination", metavar="DESTINATION",
-                      help="project to move into: a path such as work/client, '..' for the "
-                           "parent, or '/' for root")
-
-    delete = sub.add_parser("delete", help="delete this task or empty project",
-                            description="Delete a task (with its time blocks and description) "
-                                        "or an empty project. Asks first unless -y/--yes is given.")
-    delete.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
-    return parser
-
-
-def main(argv=None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    store = Store()
-    try:
-        if argv and argv[0] in ("-h", "--help"):
-            print(helpdocs.topic())
-            return 0
-        if not argv:
-            argv = ["ACTIVE", "info"]        # bare `tasklog` shows the running task
-
-        if argv[0] == "help":
-            args = build_main_parser().parse_args(argv)
-            print(helpdocs.topic(args.topic))
-            return 0
-
-        if argv[0] in HANDLERS:
-            args = build_main_parser().parse_args(argv)
-            HANDLERS[args.command](store, args)
-            return 0
-
-        # Otherwise the first word should be a task ID: `tasklog ID VERB ...`
-        if argv[0] in ID_VERBS:
-            raise TasklogError(f"put the task ID first, e.g. 'tasklog <ID> {argv[0]}'")
-        if argv[0].startswith("-"):
-            raise TasklogError(f"unknown option '{argv[0]}'. Run 'tasklog help' for usage.")
-
-        args = build_id_parser().parse_args(argv[1:])
-        args.id = argv[0]
-        ID_HANDLERS[args.verb](store, args)
-        return 0
-    except TasklogError as err:
-        print(f"tasklog: error: {err}", file=sys.stderr)
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+def topic(name=None) -> str:
+    """Return the text for a help topic, or the overview when no topic is given."""
+    if not name:
+        return OVERVIEW
+    if name not in TOPICS:
+        available = ", ".join(sorted(TOPICS))
+        raise TasklogError(f"no help topic '{name}'. Available topics: {available}")
+    return TOPICS[name]
