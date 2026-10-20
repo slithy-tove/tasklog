@@ -11,11 +11,11 @@ import shlex
 import shutil
 import sys
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .errors import TasklogError
 from .lookup import display_path, projects_by_path, resolve_id, resolve_project, validate_name
-from .report import fmt_duration, run as run_report
+from .report import _print_table, fmt_duration, run as run_report
 from .store import DEFAULT_LABEL, Entity
 from .timeparse import parse_datetime
 
@@ -198,14 +198,45 @@ def cmd_desc(store, args) -> None:
     print(f"Description of '{task.name}' saved ({path})")
 
 
+def cmd_info(store, args) -> None:
+    """Print a task's details and every time block it has (the description is not shown)."""
+    entities = store.load_entities()
+    task = resolve_id(entities, args.id)
+    state = store.load_state()
+
+    rows = [(b["start"], b["end"], False)
+            for b in sorted((b for b in store.iter_blocks() if b["id"] == task.id),
+                            key=lambda b: b["start"])]
+    active = state.get("active")
+    running = bool(active and active["id"] == task.id)
+    if running:
+        rows.append((datetime.fromisoformat(active["start"]), _now(), True))
+
+    total = sum((end - start for start, end, _ in rows), timedelta(0))
+    print(f"Task:     {task.name} [{task.id}]")
+    print(f"Project:  {display_path(task.parent)}")
+    print(f"Label:    {task.label}")
+    print(f"Created:  {task.created}")
+    print(f"Status:   {'running' if running else 'stopped'}")
+    print(f"Total:    {fmt_duration(total)}")
+    print(f"Blocks:   {len(rows)}")
+    if rows:
+        print()
+        table = [[start.strftime("%Y-%m-%d %H:%M:%S"),
+                  end.strftime("%Y-%m-%d %H:%M:%S") + (" (running)" if is_running else ""),
+                  fmt_duration(end - start)]
+                 for start, end, is_running in rows]
+        _print_table(["START", "END", "DURATION"], table)
+
+
 def _pick_editor() -> str:
-    """$VISUAL, then $EDITOR, then a sensible fallback for the platform."""
+    """$VISUAL, then $EDITOR, then vim (falling back to vi if vim is not installed)."""
     for var in ("VISUAL", "EDITOR"):
         if os.environ.get(var):
             return os.environ[var]
     if os.name == "nt":
         return "notepad"
-    for candidate in ("nano", "vi"):
+    for candidate in ("vim", "vi"):
         if shutil.which(candidate):
             return candidate
     raise TasklogError("no editor found; set the EDITOR environment variable")

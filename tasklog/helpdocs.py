@@ -25,7 +25,8 @@ Commands
   tasklog ID stop                 Stop tracking that task.
   tasklog ID manual START END     Add a finished time block.
   tasklog ID label LABEL          Set the label ("none" clears it).
-  tasklog ID desc                 Edit the long description in your editor.
+  tasklog ID info                 Show a task's details and all its time blocks.
+  tasklog ID desc                 Edit the long description in your editor (default: vim).
   tasklog ID rename NEW_NAME      Rename a task or project.
   tasklog ID delete [-y]          Delete a task (with its time) or an empty project.
   tasklog report ...              Totals, filters and sweeps. See: tasklog help report

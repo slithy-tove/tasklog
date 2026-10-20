@@ -14,7 +14,7 @@ from . import commands, helpdocs
 from .errors import TasklogError
 from .store import Store
 
-ID_VERBS = ("start", "stop", "manual", "label", "desc", "rename", "delete")
+ID_VERBS = ("start", "stop", "manual", "label", "desc", "rename", "delete", "info")
 
 HANDLERS = {
     "cd": commands.cmd_cd,
@@ -31,6 +31,7 @@ ID_HANDLERS = {
     "desc": commands.cmd_desc,
     "rename": commands.cmd_rename,
     "delete": commands.cmd_delete,
+    "info": commands.cmd_info,
 }
 
 
@@ -111,8 +112,12 @@ def build_id_parser() -> argparse.ArgumentParser:
                                        "Use 'none' to clear it.")
     label.add_argument("label", metavar="LABEL")
 
+    sub.add_parser("info", help="show details and time blocks for this task",
+                   description="Print a task's project, label, status, total time, and every "
+                               "time block it has. The description is not shown; use 'desc' for it.")
+
     sub.add_parser("desc", help="edit the long description in your editor",
-                   description="Open the description in $VISUAL or $EDITOR.")
+                   description="Open the description in $VISUAL or $EDITOR (default: vim).")
 
     rename = sub.add_parser("rename", help="rename this task or project",
                             description="Rename a task or project. Renaming a project also "

@@ -20,7 +20,8 @@ tasklog 3f start                  # partial IDs work
 tasklog 3f stop
 tasklog 3f label billing
 tasklog 3f manual today::09:00:00 today::10:30:00
-tasklog 3f desc                   # opens $EDITOR
+tasklog 3f info                   # details and time blocks for a task
+tasklog 3f desc                   # opens $VISUAL/$EDITOR (default: vim)
 tasklog 3f rename website-v2      # works for projects too
 tasklog 3f delete                 # asks first; -y skips the prompt
 tasklog cd
