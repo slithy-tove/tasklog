@@ -135,7 +135,8 @@ def build_id_parser() -> argparse.ArgumentParser:
     sub.add_parser("info", help="show details and time blocks (task or project)",
                    description="For a task: its project, label, status, total time and every "
                                "time block. For a project: its contents, completion percentage, "
-                               "and the total time and blocks of every task inside it. The "
+                               "a completion line for each item directly inside it, and the "
+                               "total time and blocks of every task inside it. The "
                                "description is not shown; use 'desc' for it. Both list the "
                                "attached files.")
 

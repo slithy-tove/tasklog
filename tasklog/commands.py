@@ -77,6 +77,30 @@ def _percent_complete(entities: Dict[str, Entity], project: Entity) -> Optional[
     return sum(values) / len(values) if values else None
 
 
+def _print_item_completion(entities: Dict[str, Entity], project: Entity) -> None:
+    """One row per task and subproject directly inside `project`, with its completion.
+
+    Uses the same rules as the project's own percentage: a task is 0% or 100%, and a
+    subproject is its recursive average. Subprojects with no tasks show "no tasks yet".
+    Items are listed in the same order as `ls`.
+    """
+    children = [e for e in entities.values() if e.parent == project.path]
+    if not children:
+        return
+    children.sort(key=lambda e: (e.kind != "project", e.name.lower()))
+    rows = []
+    for child in children:
+        if child.kind == "task":
+            share = 1.0 if child.status == COMPLETE else 0.0
+        else:
+            share = _percent_complete(entities, child)
+        text = "no tasks yet" if share is None else f"{share * 100:.1f}%"
+        name = f"{child.name}/" if child.kind == "project" else child.name
+        rows.append([child.id, name, text])
+    print()
+    _print_table(["ID", "ITEM", "COMPLETE"], rows)
+
+
 def _attachments(store, entity: Entity) -> List[str]:
     """Names of the files attached to a task or project, sorted."""
     folder = store.files_path(entity.id)
@@ -503,6 +527,7 @@ def cmd_info(store, args) -> None:
     print(f"Total:    {fmt_duration(total)}")
     print(f"Blocks:   {len(rows)}")
     print(f"Files:    {', '.join(_attachments(store, item)) or '(none)'}")
+    _print_item_completion(entities, item)
     if rows:
         print()
         _print_block_table(rows, with_task=True)
