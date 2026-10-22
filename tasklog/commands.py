@@ -6,21 +6,26 @@ Business rules worth knowing:
   * `ID stop` only stops the task you name, so a typo cannot stop the wrong timer.
   * Names are unique among siblings (a project and a task cannot share a name in one place).
   * The keyword ACTIVE can be used wherever a task ID is expected.
-  * Projects accept info, desc, rename and delete. Time-tracking verbs (start, stop,
-    manual, label) work on tasks only; a project's time is the sum of the tasks inside it.
+  * Projects accept info, desc, rename, move, delete, upload and download. Time-tracking
+    verbs (start, stop, manual, label, edit, complete, reopen) work on tasks only; a
+    project's time is the sum of the tasks inside it, and its completion is the average
+    of its children (each subproject and each direct task counts equally).
 """
+import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta
-from typing import Iterable, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .errors import TasklogError
 from .lookup import display_path, join_path, projects_by_path, resolve_id, resolve_project, validate_name
 from .report import _print_table, fmt_duration, run as run_report
-from .store import DEFAULT_LABEL, Entity
+from .store import COMPLETE, DEFAULT_LABEL, OPEN, Entity
 from .timeparse import parse_datetime
 
 
@@ -50,6 +55,34 @@ def _inside(entities: dict, project: Entity) -> List[Entity]:
     """Every project and task below `project`, at any depth."""
     return [e for e in entities.values()
             if e.parent == project.path or e.parent.startswith(project.path + "/")]
+
+
+def _percent_complete(entities: Dict[str, Entity], project: Entity) -> Optional[float]:
+    """Fraction (0.0 to 1.0) of a project that is complete, or None if it holds no tasks.
+
+    Each direct child counts equally: a task is 1 when complete and 0 when not, and a
+    subproject counts as its own completion. Subprojects with no tasks at all are
+    left out, so they do not drag the average down.
+    """
+    values = []
+    for child in entities.values():
+        if child.parent != project.path:
+            continue
+        if child.kind == "task":
+            values.append(1.0 if child.status == COMPLETE else 0.0)
+        else:
+            share = _percent_complete(entities, child)
+            if share is not None:
+                values.append(share)
+    return sum(values) / len(values) if values else None
+
+
+def _attachments(store, entity: Entity) -> List[str]:
+    """Names of the files attached to a task or project, sorted."""
+    folder = store.files_path(entity.id)
+    if not folder.is_dir():
+        return []
+    return sorted(p.name for p in folder.iterdir() if p.is_file())
 
 
 def normalize_label(text: str) -> str:
@@ -110,11 +143,12 @@ def cmd_ls(store, args) -> None:
     if not children:
         print("  (nothing here yet)")
         return
-    print(f"  {'ID':<8}{'TYPE':<10}{'LABEL':<16}NAME")
+    print(f"  {'ID':<8}{'TYPE':<10}{'LABEL':<16}{'DONE':<6}NAME")
     for e in children:
         label = e.label if e.kind == "task" else ""
+        done = ("yes" if e.status == COMPLETE else "no") if e.kind == "task" else ""
         name = e.name if e.kind == "task" else f"{e.name}/"
-        print(f"  {e.id:<8}{e.kind:<10}{label:<16}{name}")
+        print(f"  {e.id:<8}{e.kind:<10}{label:<16}{done:<6}{name}")
 
 
 def cmd_create(store, args) -> None:
@@ -136,6 +170,7 @@ def cmd_create(store, args) -> None:
         name=name,
         label=label,
         created=_now().isoformat(timespec="seconds"),
+        status=OPEN if kind == "task" else None,
     )
     entities[entity.id] = entity
     store.save_entities(entities)
@@ -212,6 +247,184 @@ def cmd_label(store, args) -> None:
     print(f"Label of '{task.name}' set to {label}")
 
 
+def _set_status(store, args, status: str, action: str) -> None:
+    entities = store.load_entities()
+    task = _task_only(store, entities, args.id, action)
+    if task.status == status:
+        raise TasklogError(f"'{task.name}' is already {status}")
+    task.status = status
+    entities[task.id] = task
+    store.save_entities(entities)
+    verb = "complete" if status == COMPLETE else "open again"
+    print(f"Marked '{task.name}' [{task.id}] {verb}")
+
+
+def cmd_complete(store, args) -> None:
+    _set_status(store, args, COMPLETE, "marking completion")
+
+
+def cmd_reopen(store, args) -> None:
+    _set_status(store, args, OPEN, "marking completion")
+
+
+# ----- editing time blocks (ID edit) -----
+
+def _parse_edit_time(text: str) -> datetime:
+    """Parse a time in the edit file: ISO form (as written by `edit`) or any `ID manual` form."""
+    try:
+        value = datetime.fromisoformat(text.strip())
+    except ValueError:
+        return parse_datetime(text)
+    if value.tzinfo is not None:
+        raise TasklogError(f"'{text}' has a time zone; use local times without one")
+    return value
+
+
+def _parse_block_list(text: str, source: Path) -> List[Tuple[datetime, datetime]]:
+    """Turn the edited JSON into (start, end) pairs, checking every entry.
+
+    Each entry is an object with "start" and "end". Times may be written as the ISO
+    form that `edit` writes (2026-10-20T09:00:00) or in any form `ID manual` accepts.
+    Errors name the entry, and the file is kept so nothing is lost.
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as err:
+        raise TasklogError(f"not valid JSON (line {err.lineno}: {err.msg}); "
+                           f"your edits are still in {source}")
+    if not isinstance(data, list):
+        raise TasklogError(f"the top level must be a list of blocks, e.g. [ {{...}} ]; "
+                           f"your edits are still in {source}")
+
+    blocks = []
+    for number, item in enumerate(data, 1):
+        if not isinstance(item, dict) or set(item) != {"start", "end"}:
+            raise TasklogError(f"block {number} must have exactly the keys \"start\" and \"end\"; "
+                               f"your edits are still in {source}")
+        try:
+            start = _parse_edit_time(str(item["start"]))
+            end = _parse_edit_time(str(item["end"]))
+        except TasklogError as err:
+            raise TasklogError(f"block {number}: {err}; your edits are still in {source}")
+        if end <= start:
+            raise TasklogError(f"block {number}: END must be after START; your edits are still in {source}")
+        blocks.append((start, end))
+    return sorted(blocks)
+
+
+def _check_block_overlaps(store, state: dict, task: Entity,
+                          blocks: List[Tuple[datetime, datetime]], entities: Dict[str, Entity]) -> None:
+    """Reject blocks that overlap each other or time already recorded for other tasks."""
+    for (_, prev_end), (start, _) in zip(blocks, blocks[1:]):
+        if start < prev_end:
+            raise TasklogError(f"blocks overlap each other around {start.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    others = [b for b in store.iter_blocks() if b["id"] != task.id]
+    active = state.get("active")
+    if active and active["id"] != task.id:
+        others.append({"id": active["id"],
+                       "start": datetime.fromisoformat(active["start"]),
+                       "end": datetime.now()})
+    for start, end in blocks:
+        for other in others:
+            if start < other["end"] and end > other["start"]:
+                owner = entities.get(other["id"])
+                owner_name = owner.name if owner else other["id"]
+                raise TasklogError(
+                    f"block {start.strftime('%Y-%m-%d %H:%M:%S')} to {end.strftime('%H:%M:%S')} "
+                    f"overlaps time for '{owner_name}'")
+
+
+def cmd_edit(store, args) -> None:
+    """Edit a task's time blocks as JSON in the editor. Nothing changes unless the file is valid."""
+    entities = store.load_entities()
+    task = _task_only(store, entities, args.id, "editing time blocks")
+    state = store.load_state()
+
+    current = [{"start": b["start"].isoformat(timespec="seconds"),
+                "end": b["end"].isoformat(timespec="seconds")}
+               for b in sorted((b for b in store.iter_blocks() if b["id"] == task.id),
+                               key=lambda b: b["start"])]
+    original = json.dumps(current, indent=2) + "\n"
+
+    fd, name = tempfile.mkstemp(prefix=f"tasklog-{task.id}-", suffix=".json")
+    path = Path(name)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(original)
+
+    editor = _pick_editor()
+    result = subprocess.run([*shlex.split(editor), str(path)])
+    if result.returncode != 0:
+        raise TasklogError(f"editor '{editor}' exited with status {result.returncode}; "
+                           f"no changes made (your draft is in {path})")
+
+    edited = path.read_text(encoding="utf-8")
+    if edited == original:
+        path.unlink()
+        print(f"No changes to '{task.name}'")
+        return
+
+    blocks = _parse_block_list(edited, path)
+    _check_block_overlaps(store, state, task, blocks, entities)
+    dropped = store.replace_blocks_for(task.id, blocks)
+    path.unlink()
+    total = sum((end - start for start, end in blocks), timedelta(0))
+    print(f"Saved '{task.name}': {len(blocks)} block(s), total {fmt_duration(total)} "
+          f"(was {dropped} block(s))")
+
+
+# ----- attached files (ID upload / ID download) -----
+
+def cmd_upload(store, args) -> None:
+    """Attach files to a task or project. Files keep their names; existing ones are kept unless -f."""
+    entities = store.load_entities()
+    item = _resolve(store, entities, args.id, kind=None)
+
+    plan = []
+    seen = set()
+    for raw in args.files:
+        source = Path(raw).expanduser()
+        if not source.is_file():
+            raise TasklogError(f"no such file: '{raw}'")
+        name = source.name
+        if name in seen:
+            raise TasklogError(f"two of the files are named '{name}'; upload them in separate commands")
+        seen.add(name)
+        if (store.files_path(item.id) / name).exists() and not args.force:
+            raise TasklogError(f"'{name}' is already attached to {item.kind} '{item.name}'; "
+                               f"use -f to replace it")
+        plan.append((source, name))
+
+    folder = store.files_path(item.id)
+    folder.mkdir(parents=True, exist_ok=True)
+    for source, name in plan:
+        shutil.copyfile(source, folder / name)
+        print(f"Uploaded '{name}' to {item.kind} '{item.name}'")
+
+
+def cmd_download(store, args) -> None:
+    """Copy attached files into the folder you run the command from. Refuses to overwrite unless -f."""
+    entities = store.load_entities()
+    item = _resolve(store, entities, args.id, kind=None)
+    folder = store.files_path(item.id)
+
+    plan = []
+    for name in args.names:
+        if name in ("", ".", "..") or Path(name).name != name:
+            raise TasklogError(f"'{name}' is not a file name")
+        source = folder / name
+        if not source.is_file():
+            raise TasklogError(f"{item.kind} '{item.name}' has no file named '{name}'")
+        target = Path.cwd() / name
+        if target.exists() and not args.force:
+            raise TasklogError(f"'{name}' already exists here; use -f to overwrite it")
+        plan.append((source, target))
+
+    for source, target in plan:
+        shutil.copyfile(source, target)
+        print(f"Downloaded '{target.name}' to {target}")
+
+
 # ----- details -----
 
 def _block_rows(store, entities: dict, state: dict, task_ids: Iterable[str]) -> List[Tuple]:
@@ -260,8 +473,10 @@ def cmd_info(store, args) -> None:
         print(f"Label:    {item.label}")
         print(f"Created:  {item.created}")
         print(f"Status:   {'running' if running else 'stopped'}")
+        print(f"Complete: {'yes' if item.status == COMPLETE else 'no'}")
         print(f"Total:    {fmt_duration(total)}")
         print(f"Blocks:   {len(rows)}")
+        print(f"Files:    {', '.join(_attachments(store, item)) or '(none)'}")
         if rows:
             print()
             _print_block_table(rows, with_task=False)
@@ -276,13 +491,18 @@ def cmd_info(store, args) -> None:
     n_projects = len(members) - n_tasks
     running = now_running_id in task_ids
 
+    share = _percent_complete(entities, item)
+    complete = "no tasks yet" if share is None else f"{share * 100:.1f}%"
+
     print(f"Project:  {item.name} [{item.id}]")
     print(f"Path:     {display_path(item.path)}")
     print(f"Contents: {n_tasks} task(s), {n_projects} subproject(s)")
     print(f"Created:  {item.created}")
     print(f"Status:   {'a task inside is running' if running else 'nothing running'}")
+    print(f"Complete: {complete}")
     print(f"Total:    {fmt_duration(total)}")
     print(f"Blocks:   {len(rows)}")
+    print(f"Files:    {', '.join(_attachments(store, item)) or '(none)'}")
     if rows:
         print()
         _print_block_table(rows, with_task=True)
@@ -391,7 +611,7 @@ def cmd_move(store, args) -> None:
 
 
 def cmd_delete(store, args) -> None:
-    """Delete a task (with its time blocks) or an empty project. Descriptions are removed too."""
+    """Delete a task (with its time blocks) or an empty project. Descriptions and files are removed too."""
     entities = store.load_entities()
     entity = _resolve(store, entities, args.id, kind=None)
     state = store.load_state()
@@ -405,6 +625,9 @@ def cmd_delete(store, args) -> None:
     else:
         blocks = sum(1 for b in store.iter_blocks() if b["id"] == entity.id)
         detail = f" and its {blocks} time block(s)"
+    files = len(_attachments(store, entity))
+    if files:
+        detail += f" and {files} attached file(s)"
 
     if not args.yes:
         if not sys.stdin.isatty():
@@ -429,5 +652,6 @@ def cmd_delete(store, args) -> None:
     if entity.kind == "task":
         store.drop_blocks_for(entity.id)
     store.desc_path(entity.id).unlink(missing_ok=True)
+    store.drop_files_for(entity.id)
     store.save_state(state)
     print(f"Deleted {entity.kind} '{entity.name}' [{entity.id}]")

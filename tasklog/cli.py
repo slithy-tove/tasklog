@@ -14,7 +14,8 @@ from . import commands, helpdocs
 from .errors import TasklogError
 from .store import Store
 
-ID_VERBS = ("start", "stop", "manual", "label", "desc", "rename", "move", "delete", "info")
+ID_VERBS = ("start", "stop", "manual", "label", "complete", "reopen", "edit",
+            "desc", "rename", "move", "delete", "info", "upload", "download")
 
 HANDLERS = {
     "cd": commands.cmd_cd,
@@ -28,11 +29,16 @@ ID_HANDLERS = {
     "stop": commands.cmd_stop,
     "manual": commands.cmd_manual,
     "label": commands.cmd_label,
+    "complete": commands.cmd_complete,
+    "reopen": commands.cmd_reopen,
+    "edit": commands.cmd_edit,
     "desc": commands.cmd_desc,
     "rename": commands.cmd_rename,
     "move": commands.cmd_move,
     "delete": commands.cmd_delete,
     "info": commands.cmd_info,
+    "upload": commands.cmd_upload,
+    "download": commands.cmd_download,
 }
 
 
@@ -114,11 +120,37 @@ def build_id_parser() -> argparse.ArgumentParser:
                                        "Use 'none' to clear it.")
     label.add_argument("label", metavar="LABEL")
 
+    sub.add_parser("complete", help="mark this task as complete",
+                   description="Mark a task complete. A project's completion percentage is "
+                               "shown by 'info' on the project.")
+
+    sub.add_parser("reopen", help="mark this task as not complete again")
+
+    sub.add_parser("edit", help="edit this task's time blocks as JSON in the editor",
+                   description="Open every time block of a task as a JSON list of "
+                               "{\"start\": ..., \"end\": ...} entries in $VISUAL or $EDITOR. "
+                               "Blocks can be changed, added or removed. Nothing is saved "
+                               "if the JSON is invalid or a block overlaps other time.")
+
     sub.add_parser("info", help="show details and time blocks (task or project)",
                    description="For a task: its project, label, status, total time and every "
-                               "time block. For a project: its contents and the total time and "
-                               "blocks of every task inside it. The description is not shown; "
-                               "use 'desc' for it.")
+                               "time block. For a project: its contents, completion percentage, "
+                               "and the total time and blocks of every task inside it. The "
+                               "description is not shown; use 'desc' for it. Both list the "
+                               "attached files.")
+
+    upload = sub.add_parser("upload", help="attach files to this task or project",
+                            description="Copy files into tasklog's store, keeping their names. "
+                                        "Refuses to replace an attached file unless -f is given.")
+    upload.add_argument("files", nargs="+", metavar="FILE", help="file(s) to attach")
+    upload.add_argument("-f", "--force", action="store_true", help="replace files with the same name")
+
+    download = sub.add_parser("download", help="copy attached files into the current folder",
+                              description="Copy attached files (named as shown by 'info') into the "
+                                          "folder you are in, so they can be opened. Refuses to "
+                                          "overwrite a file here unless -f is given.")
+    download.add_argument("names", nargs="+", metavar="FILE", help="attached file name(s)")
+    download.add_argument("-f", "--force", action="store_true", help="overwrite files already here")
 
     sub.add_parser("desc", help="edit the long description (task or project)",
                    description="Open the description in $VISUAL or $EDITOR (default: vim). "

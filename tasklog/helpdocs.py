@@ -25,18 +25,23 @@ Commands
   tasklog ID stop                 Stop tracking that task.
   tasklog ID manual START END     Add a finished time block.
   tasklog ID label LABEL          Set the label ("none" clears it).
-  tasklog ID info                 Details and time blocks. For a project, the totals
-                                  of everything inside it.
+  tasklog ID complete             Mark a task complete.
+  tasklog ID reopen               Mark a task not complete again.
+  tasklog ID edit                 Edit a task's time blocks as JSON in the editor.
+  tasklog ID info                 Details, time blocks and files. For a project, the
+                                  completion percentage and totals of everything inside it.
   tasklog ID desc                 Edit the long description (default editor: vim).
                                   Works for tasks and projects.
   tasklog ID rename NEW_NAME      Rename a task or project.
   tasklog ID move DESTINATION     Move a task or project into another project.
-  tasklog ID delete [-y]          Delete a task (with its time) or an empty project.
+  tasklog ID upload FILE...       Attach files to a task or project (-f replaces).
+  tasklog ID download FILE...     Copy attached files into the current folder (-f overwrites).
+  tasklog ID delete [-y]          Delete a task (with its time and files) or an empty project.
 
-  start, stop, manual and label work on tasks only. Track time on a task inside a
-  project; a project's time is the sum of the tasks below it.
+  start, stop, manual, label, complete, reopen and edit work on tasks only. Track time
+  on a task inside a project; a project's time is the sum of the tasks below it.
   tasklog report ...              Totals, filters and sweeps. See: tasklog help report
-  tasklog help [TOPIC]            Detailed help. Topics: ids, dates, report, storage, cd
+  tasklog help [TOPIC]            Detailed help. Topics: ids, dates, report, storage, cd, complete
 
 Running just "tasklog" shows the running task's details (same as "tasklog ACTIVE info").
 Shorthand and long forms are both accepted, for example -p and --project.
@@ -116,10 +121,26 @@ Where your data lives
   blocks.jsonl   Finished time blocks, appended one line at a time.
   state.json     The pointer and the running timer.
   desc/ID.txt    Long descriptions, read only by `ID desc`.
+  files/ID/      Files attached with `ID upload`, under their original names.
 
   Recording time only appends to blocks.jsonl, so it stays fast as history grows.
   The index is rewritten in full when you create items or change labels.
+  `ID edit` is the only other command that rewrites blocks.jsonl.
   Everything is plain text, so you can inspect or back it up with normal tools.
+"""
+
+COMPLETE = """\
+Completion
+  A task is either complete or not. Mark it with `tasklog ID complete` and
+  undo with `tasklog ID reopen`. New tasks start not complete.
+
+  A project has no completion flag of its own. Its percentage is worked out
+  from what is inside it, when you run `tasklog ID info` on the project:
+    - each direct task counts as 100% if complete, otherwise 0%;
+    - each subproject counts as its own percentage, however many tasks it holds;
+    - the project's percentage is the average of those items, all equal weight.
+  Subprojects with no tasks at all are left out. A project with no tasks shows
+  "no tasks yet".
 """
 
 CD = """\
@@ -142,6 +163,7 @@ TOPICS = {
     "report": REPORT,
     "storage": STORAGE,
     "cd": CD,
+    "complete": COMPLETE,
 }
 
 

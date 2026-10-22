@@ -3,14 +3,16 @@
 Data directory: ~/.tasklog by default, or the folder named by the TASKLOG_HOME variable.
 
   index.jsonl    One line per project or task, containing only header fields
-                 (id, kind, parent, name, label, created). It is small, so it is
-                 read on every command, and it is all that `cd` and `ls` need.
-  blocks.jsonl   Append-only log of finished time blocks. Starting or stopping a
-                 timer appends one line; existing history is never rewritten, so the
-                 cost of recording time does not grow with the amount of history.
+                 (id, kind, parent, name, label, status, created). It is small, so it
+                 is read on every command, and it is all that `cd` and `ls` need.
+  blocks.jsonl   Log of finished time blocks. Starting or stopping a timer appends one
+                 line. Only `ID delete` and `ID edit` rewrite it.
   state.json     The "pointer" (current project) and the running timer, if any.
   desc/<id>.txt  Long descriptions, one file per task. Only `tasklog ID desc` reads
                  them, so browsing projects never loads descriptions.
+  files/<id>/    Files attached to a task or project with `ID upload`, kept under
+                 their original names. Only the upload, download and info commands
+                 look here.
 
 Files that must be rewritten (index.jsonl, state.json) are first written to a
 temporary file and then renamed over the original, so a crash mid-write cannot
@@ -25,7 +27,7 @@ import string
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterator, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from .errors import TasklogError
 
@@ -33,6 +35,8 @@ ID_CHARS = string.ascii_lowercase + string.digits   # alphabet for random IDs
 ID_LENGTH = 6                                       # IDs are six characters
 DEFAULT_LABEL = "None"
 FORMAT_VERSION = "2"                                # see Store._migrate_dots_to_slashes
+OPEN = "open"                                       # task status: not finished
+COMPLETE = "complete"                               # task status: finished
 
 
 @dataclass
@@ -48,6 +52,7 @@ class Entity:
     name: str
     label: str = DEFAULT_LABEL     # tasks only; one label each
     created: str = ""
+    status: Optional[str] = None   # tasks only: OPEN or COMPLETE. Projects leave it None.
 
     @property
     def path(self) -> str:
@@ -64,6 +69,7 @@ class Store:
         self.blocks_path = self.home / "blocks.jsonl"
         self.state_path = self.home / "state.json"
         self.desc_dir = self.home / "desc"
+        self.files_dir = self.home / "files"
 
     # ---- index: projects and tasks (headers only) ----
 
@@ -155,29 +161,56 @@ class Store:
                         "end": datetime.fromisoformat(raw["end"]),
                     }
 
-    def drop_blocks_for(self, task_id: str) -> int:
-        """Remove every block belonging to a task; returns how many were removed.
+    def replace_blocks_for(self, task_id: str, blocks: List[Tuple[datetime, datetime]]) -> int:
+        """Swap every block of a task for `blocks`; returns how many old blocks were removed.
 
-        Used only by `ID delete`. This is the one place where blocks.jsonl is rewritten.
+        Used by `ID edit` and, with an empty list, by `ID delete`. Blocks of other
+        tasks are kept byte-for-byte. This rewrites blocks.jsonl, so callers must
+        validate `blocks` first.
         """
-        if not self.blocks_path.exists():
-            return 0
-        kept, dropped = [], 0
-        with self.blocks_path.open(encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                if json.loads(line)["id"] == task_id:
-                    dropped += 1
-                else:
-                    kept.append(line if line.endswith("\n") else line + "\n")
+        kept: List[str] = []
+        dropped = 0
+        if self.blocks_path.exists():
+            with self.blocks_path.open(encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    if json.loads(line)["id"] == task_id:
+                        dropped += 1
+                    else:
+                        kept.append(line if line.endswith("\n") else line + "\n")
+        for start, end in blocks:
+            kept.append(json.dumps({
+                "id": task_id,
+                "start": start.isoformat(timespec="seconds"),
+                "end": end.isoformat(timespec="seconds"),
+            }) + "\n")
+        self.home.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.blocks_path, "".join(kept))
         return dropped
+
+    def drop_blocks_for(self, task_id: str) -> int:
+        """Remove every block belonging to a task; returns how many were removed."""
+        return self.replace_blocks_for(task_id, [])
 
     # ---- descriptions ----
 
     def desc_path(self, task_id: str) -> Path:
         return self.desc_dir / f"{task_id}.txt"
+
+    # ---- attached files ----
+
+    def files_path(self, entity_id: str) -> Path:
+        """Folder holding the files attached to one task or project."""
+        return self.files_dir / entity_id
+
+    def drop_files_for(self, entity_id: str) -> None:
+        """Delete every file attached to an item (used when the item is deleted)."""
+        folder = self.files_path(entity_id)
+        if folder.is_dir():
+            for child in folder.iterdir():
+                child.unlink()
+            folder.rmdir()
 
 
 def _atomic_write(path: Path, text: str) -> None:
