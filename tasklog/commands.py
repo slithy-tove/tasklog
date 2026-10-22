@@ -8,8 +8,8 @@ Business rules worth knowing:
   * The keyword ACTIVE can be used wherever a task ID is expected.
   * Projects accept info, desc, rename, move, delete, upload and download. Time-tracking
     verbs (start, stop, manual, label, edit, complete, reopen) work on tasks only; a
-    project's time is the sum of the tasks inside it, and its completion is the average
-    of its children (each subproject and each direct task counts equally).
+    project's time is the sum of the tasks inside it, and its completion is the share of
+    those tasks, at any depth, that are complete.
 """
 import json
 import os
@@ -58,30 +58,24 @@ def _inside(entities: dict, project: Entity) -> List[Entity]:
 
 
 def _percent_complete(entities: Dict[str, Entity], project: Entity) -> Optional[float]:
-    """Fraction (0.0 to 1.0) of a project that is complete, or None if it holds no tasks.
+    """Fraction (0.0 to 1.0) of the tasks inside a project that are complete.
 
-    Each direct child counts equally: a task is 1 when complete and 0 when not, and a
-    subproject counts as its own completion. Subprojects with no tasks at all are
-    left out, so they do not drag the average down.
+    Every task counts once, at any depth below the project, so a task in a deep
+    subproject weighs the same as one directly inside. None if there are no tasks.
     """
-    values = []
-    for child in entities.values():
-        if child.parent != project.path:
-            continue
-        if child.kind == "task":
-            values.append(1.0 if child.status == COMPLETE else 0.0)
-        else:
-            share = _percent_complete(entities, child)
-            if share is not None:
-                values.append(share)
-    return sum(values) / len(values) if values else None
+    tasks = [e for e in _inside(entities, project) if e.kind == "task"]
+    if not tasks:
+        return None
+    done = sum(1 for t in tasks if t.status == COMPLETE)
+    return done / len(tasks)
 
 
 def _print_item_completion(entities: Dict[str, Entity], project: Entity) -> None:
     """One row per task and subproject directly inside `project`, with its completion.
 
-    Uses the same rules as the project's own percentage: a task is 0% or 100%, and a
-    subproject is its recursive average. Subprojects with no tasks show "no tasks yet".
+    Uses the same formula as the project's own percentage: a task is 0% or 100%, and a
+    subproject is the share of its tasks (at any depth) that are complete. Subprojects
+    with no tasks show "no tasks yet".
     Items are listed in the same order as `ls`.
     """
     children = [e for e in entities.values() if e.parent == project.path]

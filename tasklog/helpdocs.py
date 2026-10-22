@@ -134,13 +134,11 @@ Completion
   A task is either complete or not. Mark it with `tasklog ID complete` and
   undo with `tasklog ID reopen`. New tasks start not complete.
 
-  A project has no completion flag of its own. Its percentage is worked out
-  from what is inside it, when you run `tasklog ID info` on the project:
-    - each direct task counts as 100% if complete, otherwise 0%;
-    - each subproject counts as its own percentage, however many tasks it holds;
-    - the project's percentage is the average of those items, all equal weight.
-  Subprojects with no tasks at all are left out. A project with no tasks shows
-  "no tasks yet".
+  A project has no completion flag of its own. Its percentage is the share of
+  tasks inside it, at any depth, that are complete. Every task counts once, so a
+  task in a deep subproject weighs the same as one directly in the project.
+  Run `tasklog ID info` on a project to see its percentage, with a line for each
+  item directly inside it. A project with no tasks shows "no tasks yet".
 """
 
 CD = """\
